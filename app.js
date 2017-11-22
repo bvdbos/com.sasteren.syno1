@@ -58,7 +58,7 @@ class SynologyMusic extends Homey.App {
 						console.log("controlURL")
 						//console.log(result.root.device[0].serviceList[0].service[1].controlURL[0]);
 						const controlUrl = 'http://' + requestUrl.hostname + ':' + requestUrl.port + result.root.device[0].serviceList[0].service[1].controlURL[0];
-						console.log (controlUrl);
+						console.log ("controlurl", controlUrl);
 						browseServer('0', controlUrl, {}, function(err, result) {
 							console.log("browse server");
 							console.log(result);
