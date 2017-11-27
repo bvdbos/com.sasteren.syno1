@@ -1,14 +1,13 @@
 'use strict';
 
 const Homey = require('homey');
-const url = require('url');
-const http = require('http');
-const xmltojs = require('xml2js');
-const browseServer = require('./lib/index.js');
-const nodessdp = require('node-ssdp').Client;
-const node_ssdp_client = new nodessdp();
-const x2js = require ('x2js.js');
-const mediaServerName = process.argv[2];
+const axios      = require('axios');
+const xmlbuilder = require('xmlbuilder');
+const get        = require('lodash.get');
+const url        = require('url');
+const xml2js     = require('xml2js');
+const { Client } = require('node-ssdp');
+const client     = new Client();
 
 class SynologyMusic extends Homey.App {
 	
@@ -16,88 +15,91 @@ class SynologyMusic extends Homey.App {
 		
 		this.log('MyApp is running...');
 		
-		var done = false;
-		node_ssdp_client.on('response', function (headers, statusCode, rinfo) {
-			const requestUrl = url.parse(headers.LOCATION);
-			const httpOptions =  {
-				host: requestUrl.hostname,
-				port: requestUrl.port,
-				path: requestUrl.pathname
+		client.on('response', async (headers, statusCode, rinfo) => {
+			let xml    = (await axios.get(headers.LOCATION)).data;
+			let result = await parseXML(xml);
+			
+			let contentDirectory = get(result, 'root.device[0].serviceList[0].service[1]')
+			console.log("")
+			console.log("contentdir ", contentDirectory)
+			
+			if (! contentDirectory || get(contentDirectory, 'serviceType[0]') !== 'urn:schemas-upnp-org:service:ContentDirectory:1') {
+				throw Error('unable to find content directory');
 			}
-
-		const req = http.request(httpOptions, function(response) {
-		var data = '';
-		console.log("response ontvangen");
-		response.on('data', function(newData) {
-			//console.log(newData)
-			data = data + newData;
-		});
-
-		response.on('end', function() {
-			console.log(data)
-			if (done == true) {
-				return;
+			let parsed      = url.parse(headers.LOCATION);
+			parsed.pathname = contentDirectory.controlURL[0];
+			let controlURL  = url.format(parsed);
+			console.log("control url ", controlURL)
+		
+			// Browse the mediaserver.
+			let xmlBody = buildRequestXml('0');
+			try {
+				let response = await axios.post(controlURL, xmlBody, {
+					headers : {
+					'content-type'   : 'text/xml; charset="utf-8"',
+					'content-length' : xmlBody.length,
+					soapaction       : '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"'
+					}
+				});
+			let data = response.data;
+			console.log('Got a proper response:\n\n', data);
+			} catch(e) {
+				console.log('browse request failed', e);
 			}
-			if (data != "") { //catch data is null, win10 server gives this
-			xmltojs.parseString(data, function(err, result) {
-				console.log("xmltojs");
-				console.log(result.root.device[0])
-				console.log("mediaservername");
-				console.log(mediaServerName)
-				console.log("")
-				//if(result.root.device[0].friendlyName.toString() === mediaServerName) {    => why???
-				if(result.root.device[0].friendlyName.toString() != null ) {
-					console.log("server found");
-					//console.log(result.root.device[0]);
-					done = true;
-					console.log("service-list")
-					console.log(result.root.device[0].serviceList[0])
-					console.log(result.root.device[0].serviceList[0].service.length, " services")
-					if (result.root.device[0].serviceList[0].service[1].serviceType[0] === 'urn:schemas-upnp-org:service:ContentDirectory:1') { //not only on service 0 or 1 of list?
-						console.log("contentdirectory found");
-						console.log("controlURL")
-						//console.log(result.root.device[0].serviceList[0].service[1].controlURL[0]);
-						const controlUrl = 'http://' + requestUrl.hostname + ':' + requestUrl.port + result.root.device[0].serviceList[0].service[1].controlURL[0];
-						console.log ("controlurl", controlUrl);
-						browseServer('0', controlUrl, {}, function(err, result) {
-							console.log("browse server");
-							console.log(result);
-							if (err) {
-								console.log(err);
-								return;
-							}
-
-							if (result.container) {
-								for (let i = 0; i < result.container.length; i++) {
-									console.log('Container:' + result.container[i].id);
-								}
-							}
-
-							if (result.item) {
-								for (let i = 0; i < result.item.length; i++) {
-									console.log('Item:' + result.item[i].title);
-								}
-							}
-						});
-					};
-				};
-			});
-			}; //end catch data is null
-		});
-		});
-		req.on('error', function(err) {
-			console.log(err);
-		});
-		req.end();
-		});
-	
-		// search for media server and display top level content
-		node_ssdp_client.search('urn:schemas-upnp-org:device:MediaServer:1');
-		setTimeout(function() {
-			console.log('done');
-		}, 10000);
+		}).search('urn:schemas-upnp-org:device:MediaServer:1');
   
 	};
 };
+
+function parseXML(xml) {
+  return new Promise((resolve, reject) => {
+    xml2js.parseString(xml, (err, result) => {
+      if (err) return reject(err);
+      resolve(result);
+    });
+  });
+}
+
+function buildRequestXml(id, options = {}) {
+  // fill in the defaults
+  if (!options.browseFlag) {
+    options.browseFlag = 'BrowseDirectChildren';
+  }
+
+  if (!options.filter) {
+    options.filter = '\\*';
+  }
+
+  if (!options.startIndex) {
+    options.startIndex = 0;
+  }
+
+  if (!options.requestCount) {
+    options.requestCount = 1000;
+  }
+
+  if (!options.sort) {
+    options.sort = '';
+  }
+
+  // build the required xml
+  return xmlbuilder.create('s:Envelope', { version: '1.0', encoding: 'utf-8' })
+        .att('xmlns:s', 'http://schemas.xmlsoap.org/soap/envelope/')
+        .att('s:encodingStyle', 'http://schemas.xmlsoap.org/soap/encoding/')
+        .ele('s:Body')
+        .ele('u:Browse', { 'xmlns:u': 'urn:schemas-upnp-org:service:ContentDirectory:1'})
+        .ele('ObjectID', id)
+        .up().ele('BrowseFlag', options.browseFlag)
+        .up().ele('Filter', options.filter)
+        .up().ele('StartingIndex', options.startIndex)
+        .up().ele('RequestedCount', options.requestCount)
+        .up().ele('SortCriteria', options.sort)
+        .doc().end({ pretty: true, indent: '  '});
+}
+
+// node-ssdp unrefs ðŸ˜¡
+setTimeout(() => {}, 1e6);
+
+
 
 module.exports = SynologyMusic;
